@@ -1,0 +1,101 @@
+‎Executive Summary
+‎Miyo is a thoughtfully built EPUB reader specifically designed for the web-novel and Machine Translation (MTL) reading community — a niche that mainstream EPUB readers have almost entirely ignored. Its core differentiators — term replacement/correction, inline translation, ambient particle-effect themes, and bionic reading — are genuinely unique in the market and align with what this audience actually needs.
+‎
+‎However, the app carries several meaningful risks: a 3,445-line monolithic reader file that creates memory and orientation bugs; a WebView-based EPUB renderer with real XSS exposure from malicious EPUB files; unencrypted local storage of sensitive tokens; and Supabase credentials embedded in the app bundle without verifiable Row-Level Security enforcement.
+‎
+‎On the feature side, the single most requested capability across web-novel communities that Miyo is missing is Text-to-Speech (TTS) with reading sync, followed by vertical/continuous scroll mode and AMOLED black theme. Competitors like Moon+ Reader and KOReader cover these basics while lacking everything Miyo does well, meaning Miyo is well-positioned — but needs to close these gaps to convert power users.
+‎
+‎The App's Strongest Features
+‎These are Miyo's genuine competitive moats — things no mainstream competitor offers:
+‎
+‎1. Term Group System (MTL Correction Engine) — The ability to create named groups of find-and-replace rules that auto-apply during rendering is the single biggest differentiator. No other mainstream reader has this. Reddit's MTL community considers this a "dream feature" and it's executed well in the codebase with proper word-boundary detection for Latin terms.
+‎
+‎2. Ambient Particle Themes — The "Peach Blossom," "Dark Coffee," and other art-pack themes with particle effects are a genuine delight and a clear signal of design investment. No competitor even attempts this.
+‎
+‎3. Inline Chapter Translation — Translating entire chapters inline without leaving the app is rare. Most apps only offer tap-to-translate for selections. This is a major advantage for Chinese/Japanese MTL readers.
+‎
+‎4. Bionic Reading Mode — Present in very few competitors. The implementation here appears solid.
+‎
+‎5. WTR-LAB Integration + OPDS — An in-app browser wired to an MTL novel catalog, combined with OPDS for Project Gutenberg access, gives Miyo a content discovery layer that pure EPUB readers lack entirely.
+‎
+‎Vulnerabilities & Security Risks
+‎Critical: WebView XSS via EPUB Content Injection
+‎The reader renders EPUB chapters by injecting HTML content into a WebView. EPUB files are ZIP archives and can contain arbitrary HTML, CSS, and JavaScript. A malicious EPUB can embed scripts that, depending on WebView configuration, may execute with access to the local filesystem.
+‎
+‎The codebase does have a url-safety.ts module and an escapeHtmlContent/escapeHtmlAttribute pair in the reader — these are good. However, the risk is that full chapter HTML (from the EPUB itself) is injected wholesale into the WebView document, not escaped. If the WebView's allowFileAccess setting is enabled, a crafted EPUB chapter could use fetch or XMLHttpRequest to read internal app storage. Research confirms this is a known class of Android WebView vulnerability (CVE-2020-6506) and is particularly acute for file-based content.
+‎
+‎What to do: Verify allowFileAccess, allowFileAccessFromFileURLs, and allowUniversalAccessFromFileURLs are explicitly set to false in ReaderWebView. Add a Content Security Policy header to the injected HTML document that blocks all external resource loads and inline scripts.
+‎
+‎High: Unencrypted Local Storage of Sensitive Data
+‎Both AsyncStorage and react-native-mmkv are used throughout the app. Neither encrypts data by default. On a rooted Android device or via ADB backup, all tokens, reading progress, and potentially cached Supabase session data stored in these are readable in plaintext. The security research specifically flagged MMKV as unencrypted unless an encryption key is explicitly provided and managed via Android Keystore / iOS Keychain — there's no evidence in the codebase that this is being done.
+‎
+‎High: Supabase Anon Key in App Bundle + RLS Dependency
+‎The Supabase anon key is embedded in the app bundle via environment variables, which is standard practice — but it means the entire security model depends on Row-Level Security (RLS) policies being correctly configured on every table. If any table is missing an RLS policy or has an overly permissive one (e.g., authenticated role can read all rows regardless of user_id), any user can enumerate other users' data using the public API. This cannot be verified from the client codebase alone but is a critical configuration risk.
+‎
+‎Moderate: HTTP Allowed by Default in URL Safety
+‎isSafeExternalUrl in url-safety.ts has allowHttp: true as the default. This means the app will follow HTTP (unencrypted) links, exposing users on shared networks to MITM attacks when the WebView navigates to external URLs.
+‎
+‎Likely Bugs & Glitches
+‎1. Orientation Change Breaks Layout
+‎Dimensions.get('window') is called at module level in app/reader/[id].tsx (line 106) and stored in screenWidth/screenHeight constants. These values never update when the device rotates. This means the reader layout will be wrong after any orientation change until the user navigates away and back. The fix is to use the useWindowDimensions hook inside the component, as the Home screen correctly does.
+‎
+‎2. The Reader File Is 3,445 Lines — Memory Leaks Are Likely
+‎This single file manages the WebView, all panels (typography, themes, search, annotations, translation, dictionary, stats), all state, all gestures, and all JS injection. At this scale, it's nearly certain there are stale closure bugs, effect cleanup misses, and memory leaks — especially around the WebView instance and interval timers. Long reading sessions will gradually degrade performance.
+‎
+‎3. Reading Session Stats Can Be Corrupted by Concurrent Sessions
+‎sessionStartTime, sessionBookId, sessionWordsRead, and sessionChaptersRead in reading-stats.ts are module-level global variables (lines 40–43). If a user opens two books in quick succession (or a background notification triggers a session start), these globals are silently overwritten and the previous session's data is lost. This will manifest as incorrect reading streaks and word counts.
+‎
+‎4. Chapter Translation Fails Silently on Long Chapters
+‎inline-translate.ts sets MAX_CHARS = 440 for the free MyMemory API. This is fine for short text selections, but full-chapter translation would require chunking long HTML content into many sequential API calls with rate-limit handling. If this chunking logic doesn't exist, long chapters will be silently truncated or partially translated, with no user-visible error explaining why.
+‎
+‎5. Translation Cache Uses AsyncStorage (Slow)
+‎Chapter translation results are cached using AsyncStorage with prefix @miyo/chapter-translation/. For a reader app with large chunks of HTML, AsyncStorage's synchronous-bridge architecture will create noticeable lag when loading cached translations. This should use MMKV for I/O speed.
+‎
+‎6. endReadingSession Min-Duration Filter May Eat Short Intentional Sessions
+‎The session recorder filters out sessions under 30 seconds (seen from line 80 onward). For a user who opens a book, reads one chapter quickly, and closes — a fast reader could genuinely finish a short chapter in under 30 seconds. Their session vanishes from stats, breaking streak tracking.
+‎
+‎7. Google OAuth Disabled via Beta Flag — No User-Visible Explanation
+‎AuthContext imports isGoogleSignInDisabled from beta-flags.ts. If this flag is active, the "Sign in with Google" button presumably disappears or fails silently. Users who try to use it and get no feedback will abandon account creation.
+‎
+‎8. HTTP Default in URL Safety (Doubles as Bug)
+‎External link navigation defaults to allowing plain HTTP. On iOS, Apple's ATS (App Transport Security) may block these requests entirely with no user-facing error message — the link simply does nothing, which feels like a bug.
+‎
+1. ‎Next chapter button inside reading g space is currently not working well. instead of redirecting me into the starting paragraph of the next chapter, it redirects me into half the progress of the next chapter.
+‎
+10. ‎currently, the apps google drive data sync and save and google sign in feature doesn't work, even when I already put my Google client ID inside the Local Env file. and for context, google drive is configured as an API I can activate on Google console, and I already activated it on Google console API. on Android Client
+‎
+
+‎Competitive Gaps — What Miyo Is Missing
+‎Based on Reddit communities (r/ebooks, r/noveltranslations, r/androidapps, NovelUpdates forums) and competitor analysis:
+‎
+‎Tier 1: Most Requested, Highest Impact
+‎Text-to-Speech (TTS) with Reading Sync — The single most-requested feature in EPUB reader communities and completely absent from Miyo. Reddit users explicitly want TTS where the current word is highlighted as it's spoken ("read while commute, keep my place"). Moon+ Reader Pro offers this. For web-novel readers who consume extremely long books, this is a daily-use feature. The Expo ecosystem has expo-speech available which could provide a starting point.
+‎
+‎Vertical / Continuous Scroll Mode — Reddit's MTL community is emphatic: "Web novel readers are used to scrolling, not paging." Miyo appears to use chapter-by-chapter page turning. A smooth infinite-scroll mode (like how most web novel websites work) would dramatically improve comfort for the core audience. This is a significant architectural change to the WebView rendering.
+‎
+‎AMOLED True Black Theme — Multiple Reddit threads explicitly call this out: "I need a real black background, not dark gray." Miyo's existing dark themes likely use dark gray backgrounds (#1a1a1a range) rather than pure #000000. For OLED screen users, pure black saves meaningful battery and reduces eye strain. This is a minor code change with high perceived impact.
+‎
+‎Tier 2: High Value, Moderate Effort
+‎PDF Support — Every major competitor (ReadEra, Moon+, KOReader) supports PDF. While Miyo is positioned as an EPUB-first app, users with mixed libraries will consistently hit this wall. PDF support would also unlock academic paper reading.
+‎
+‎
+‎AI-Powered Summarization — Emerging strongly in 2024–2025 reading app trends. The ability to get a quick AI summary of a chapter (great for picking up after a long gap) would be a clear differentiator, especially for long web novels. This could integrate with the existing translation infrastructure. This feature should use the users own google API key to which they can put inside a secrets section inside setting tab. the feature button to open the tab should be inside the reader space, and clicking it should open the ai space tab. but when exiting, it will only exit the ai space, it wouldn't reload the reading space or cause lags and performance issue. make sure the UI designs follow the app and theme
+‎
+‎
+‎Tier 3: Nice to Have
+‎Reading Challenges & Achievements — Miyo has streaks but lacks the broader gamification layer (monthly reading challenges, badges for finishing books, community leaderboards) that newer apps are adding to drive daily engagement.
+‎
+‎Community Term Group Sharing — The app has a "Community" section in the Terms tab, but if this is not fully functional it's a major missed opportunity. A shared, crowd-sourced glossary for popular web novels (e.g., a verified term group for "A Will Eternal") would be a network-effect feature no competitor can easily replicate. A feature to share their own term groups(Currently this feature should only be accessed by Verified Members or Admins, think of how to integrate it and how should the verification work securely. We have Supabase)
+‎
+‎Landscape / Dual-Page Mode — Tablet users and users reading in landscape expect a two-column layout. Moon+ Reader offers this; Miyo appears not to.
+‎
+‎Analysis & Strategic Synthesis
+‎Miyo is operating in a real underserved niche — MTL web novel readers on mobile are poorly served by both general EPUB readers (which ignore their translation/correction needs) and web novel aggregator apps (which are ad-ridden scrapers without quality reading environments). The positioning is correct and defensible.
+‎
+‎The most dangerous strategic gap is not a missing feature — it's the 3,445-line reader file. As the app grows, every new feature bolted onto this file increases the probability of memory leaks, regression bugs, and orientation glitches that will drive away quality-conscious users. Breaking the reader into composable panels (each with its own file) is the most important architectural investment before scaling further.
+‎
+‎On the market side, the TTS gap is the sharpest vulnerability. Any competitor that adds MTL term replacement + TTS would immediately threaten Miyo's core audience. This should be prioritized above ambient themes and gamification.
+‎
+‎The security model is structurally sound (Supabase + RLS is a reasonable choice) but the implementation assumptions need auditing — specifically, confirming WebView file access is locked down and that every Supabase table has RLS enabled with user-scoped policies.
+‎
+‎
