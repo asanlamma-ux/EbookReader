@@ -18,7 +18,10 @@
     },
     "production": {
       "autoIncrement": true,
-      "prebuildCommand": "expo prebuild --clean"
+      "prebuildCommand": "expo prebuild --clean",
+      "env": {
+        "EXPO_NO_FINGERPRINT": "1"
+      }
     }
   },
   "submit": {
